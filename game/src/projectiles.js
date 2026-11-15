@@ -4,6 +4,7 @@
 // pool — at most 4 live grenades — so nothing is allocated per throw.
 import * as THREE from 'three';
 import { PALETTE } from './palette.js';
+import { GRENADE } from './weapons.js';
 import { emitSound } from './state.js';
 
 const MAX_GRENADES = 4;
@@ -27,7 +28,7 @@ export function createProjectiles(scene, world, state, combat, player, effects, 
     const mesh = new THREE.Mesh(geo, mat);
     mesh.visible = false;
     scene.add(mesh);
-    pool.push({ mesh, active: false, velocity: new THREE.Vector3(), fuse: 0, bounced: false });
+    pool.push({ mesh, active: false, velocity: new THREE.Vector3(), fuse: 0, bounced: false, shooter: null });
   }
 
   function hasLineOfSight(from, to) {
@@ -43,35 +44,43 @@ export function createProjectiles(scene, world, state, combat, player, effects, 
     grenade.active = false;
     grenade.mesh.visible = false;
     const at = grenade.mesh.position;
+    const shooter = grenade.shooter || { side: null, name: 'Kamu', isPlayer: true, weaponId: 'guntur' };
     effects.blastAt(at);
-    emitSound(state, at.x, at.z, 30, 'blast');
+    emitSound(state, at.x, at.z, 30, 'blast', shooter.side);
     if (hooks && hooks.onBlast) hooks.onBlast(at);
     const bots = hooks.getBots();
     for (const bot of bots) {
       if (!bot.alive) continue;
+      // Friendly fire is off: a blast never hurts the thrower's own team.
+      if (shooter.side && bot.side === shooter.side) continue;
       chest.set(bot.body.position.x, bot.body.position.y + 1.15, bot.body.position.z);
       const distance = Math.hypot(chest.x - at.x, chest.z - at.z);
       if (distance > BLAST_RADIUS || !hasLineOfSight(at, chest)) continue;
       const t = Math.max(0, (distance - BLAST_CENTER) / (BLAST_RADIUS - BLAST_CENTER));
       const damage = Math.round(DAMAGE_CENTER + (DAMAGE_EDGE - DAMAGE_CENTER) * t);
-      combat.damageBot(bot, damage, { isPlayer: true, name: 'Kamu', weaponId: 'rajawali' }, 'torso');
+      combat.damageBot(bot, damage, shooter, 'torso');
     }
-    // The player can hurt themself with a close blast.
+    // The player can hurt themself with a close blast; a teammate's blast
+    // never hurts the player, an enemy's always can.
     chest.set(player.state.position.x, player.state.position.y + 1.15, player.state.position.z);
     const distance = Math.hypot(chest.x - at.x, chest.z - at.z);
-    if (distance <= BLAST_RADIUS && hasLineOfSight(at, chest) && player.state.health > 0) {
+    const friendlyBlast = shooter.side && shooter.side === state.playerSide && !shooter.isPlayer;
+    if (!friendlyBlast && distance <= BLAST_RADIUS && hasLineOfSight(at, chest) && player.state.health > 0) {
       const t = Math.max(0, (distance - BLAST_CENTER) / (BLAST_RADIUS - BLAST_CENTER));
       const damage = Math.round(DAMAGE_CENTER + (DAMAGE_EDGE - DAMAGE_CENTER) * t);
-      combat.damagePlayer(damage, { name: 'Granat Guntur', weaponId: 'rajawali' });
+      combat.damagePlayer(damage, { name: GRENADE.name, weaponId: 'guntur' });
     }
   }
 
-  function throwGrenade(from, baseDir) {
+  // `shooter` is the combat shooter object ({ side, name, isPlayer, weaponId }):
+  // the blast credits its kills to whoever threw it, and never hurts its team.
+  function throwGrenade(from, baseDir, shooter) {
     const slot = pool.find((g) => !g.active);
     if (!slot) return false;
     slot.active = true;
     slot.fuse = FUSE_SECONDS;
     slot.bounced = false;
+    slot.shooter = shooter || { side: null, name: 'Kamu', isPlayer: true, weaponId: 'guntur' };
     slot.mesh.visible = true;
     slot.mesh.position.copy(from);
     slot.velocity.copy(baseDir).multiplyScalar(14);

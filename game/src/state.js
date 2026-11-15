@@ -41,9 +41,11 @@ export function createGameState() {
 }
 
 // A sound event bots may react to. Radius in metres; kinds: 'shot', 'step',
-// 'plant', 'defuse', 'blast'. Old events are pruned by bots.js each tick.
-export function emitSound(state, x, z, radius, kind) {
-  state.events.push({ x, z, radius, kind, at: state.elapsed });
+// 'plant', 'defuse', 'blast'. `side` names the team that made the noise (bots
+// ignore their own team's sounds when deciding to investigate). Old events
+// are pruned by bots.js each tick.
+export function emitSound(state, x, z, radius, kind, side) {
+  state.events.push({ x, z, radius, kind, side: side || null, at: state.elapsed });
   if (state.events.length > 24) state.events.splice(0, state.events.length - 24);
 }
 

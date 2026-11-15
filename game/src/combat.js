@@ -5,9 +5,33 @@
 // exactly the same function as the player. Kills pay +¢300, feed the kill feed,
 // and drop the Pulsar when the carrier dies. One Raycaster and a handful of
 // vectors are reused — no allocation in shoot().
+//
+// Armor (v2): a fighter with armor points absorbs half of every hit until the
+// armor is gone. Armor is bought in the buy menu (Rompi Arunika, ¢650, 50
+// points) and applies to bullets and grenade blasts alike, for the player and
+// for any bot that carries it.
 import * as THREE from 'three';
-import { WEAPONS } from './weapons.js';
+import { WEAPONS, GRENADE } from './weapons.js';
 import { addKillFeed, emitSound } from './state.js';
+
+export const ARMOR_ABSORB = 0.5;
+
+// Split a hit between armor and health. Returns the health damage; the
+// target's armor is reduced by the absorbed part. Targets without armor
+// (armor 0 or missing) take the full hit.
+export function absorbArmor(target, amount) {
+  const armor = target.armor || 0;
+  if (armor <= 0) return amount;
+  const absorbed = Math.min(armor, Math.round(amount * ARMOR_ABSORB));
+  target.armor = armor - absorbed;
+  return amount - absorbed;
+}
+
+function weaponName(shooter) {
+  const def = WEAPONS[shooter.weaponId];
+  if (def) return def.name;
+  return GRENADE.name;
+}
 
 export function createCombat(scene, world, effects, state, getBots, player) {
   const raycaster = new THREE.Raycaster();
@@ -123,19 +147,20 @@ export function createCombat(scene, world, effects, state, getBots, player) {
         hitSomething = true;
       }
     }
-    if (def.pellets > 0) emitSound(state, from.x, from.z, 25, 'shot');
+    if (def.pellets > 0) emitSound(state, from.x, from.z, 25, 'shot', shooter.side);
     return { hit: hitSomething, killed, headshot, damage: totalDamage };
   }
 
   function damageBot(bot, amount, shooter, part) {
-    bot.health -= amount;
+    const hpDamage = absorbArmor(bot, amount);
+    bot.health -= hpDamage;
     bot.lastDamageAt = state.elapsed;
     if (bot.health > 0) return false;
     bot.alive = false;
     bot.health = 0;
     bot.fall = 0;
     const shooterName = shooter.isPlayer ? 'Kamu' : shooter.name;
-    addKillFeed(state, `${shooterName} ▸ ${bot.name} [${WEAPONS[shooter.weaponId || 'rajawali'].name}]${part === 'head' ? ' ✕ HEADSHOT' : ''}`, part === 'head');
+    addKillFeed(state, `${shooterName} ▸ ${bot.name} [${weaponName(shooter)}]${part === 'head' ? ' ✕ HEADSHOT' : ''}`, part === 'head');
     if (shooter.isPlayer) {
       state.kills += 1;
       state.money = Math.min(9000, state.money + 300);
@@ -147,6 +172,7 @@ export function createCombat(scene, world, effects, state, getBots, player) {
   function dropPulsar(bot) {
     state.pulsar.state = 'dropped';
     state.pulsar.carrier = null;
+    bot.isCarrier = false;
     state.pulsar.x = bot.body.position.x;
     state.pulsar.z = bot.body.position.z;
   }
@@ -154,11 +180,11 @@ export function createCombat(scene, world, effects, state, getBots, player) {
   // Damage the player from a bot shot. Returns true when the player dies.
   function damagePlayer(amount, shooter) {
     if (player.state.health <= 0) return false;
-    player.state.health -= amount;
+    player.state.health -= absorbArmor(player.state, amount);
     if (player.state.health > 0) return false;
     player.state.health = 0;
     state.deaths += 1;
-    addKillFeed(state, `${shooter.name} ▸ Kamu [${WEAPONS[shooter.weaponId].name}]`, false);
+    addKillFeed(state, `${shooter.name} ▸ Kamu [${weaponName(shooter)}]`, false);
     if (state.pulsar.carrier === 'player') {
       state.pulsar.state = 'dropped';
       state.pulsar.carrier = null;

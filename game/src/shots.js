@@ -20,6 +20,7 @@ export function applyShot(name, api) {
     state.score.meridian = 1;
     state.money = 3800;
     state.buyTimeLeft = 12;
+    player.state.armor = 50; // Rompi Arunika just bought (v2).
     api.placePlayer(0, 20, 0, 0);
     api.placeBot(0, -3, 18, 0.3);
     api.placeBot(1, 3, 18, -0.3);

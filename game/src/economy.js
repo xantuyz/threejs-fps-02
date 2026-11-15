@@ -1,7 +1,10 @@
 // Economy: credits (¢), prices and round rewards. One place owns every number:
 // win +¢3.000, loss +¢1.900 (+¢500 per consecutive loss, capped +¢1.500),
 // kill / plant / defuse +¢300, wallet cap ¢9.000. Loadout survives death —
-// only spent grenades and ammo are gone. Buy logic only; the DOM lives in hud.js.
+// only spent grenades and ammo are gone. Armor (v2): Rompi Arunika ¢650 gives
+// 50 armor points that absorb half of every hit until gone; it is bought like
+// any other item and survives across rounds until the match ends. Buy logic
+// only; the DOM lives in hud.js.
 import { WEAPONS, GRENADE } from './weapons.js';
 
 const WIN_REWARD = 3000;
@@ -11,13 +14,21 @@ const LOSS_BONUS_CAP = 1500;
 const ACTION_REWARD = 300;
 const WALLET_CAP = 9000;
 const REFILL_PRICE = 200;
+export const ARMOR_PRICE = 650;
+export const ARMOR_POINTS = 50;
 
-export function createEconomy(state, weapon) {
+export function createEconomy(state, weapon, player) {
   function canAfford(price) {
     return state.money >= price;
   }
 
   function buy(itemId) {
+    if (itemId === 'armor') {
+      if (!player || player.state.armor >= ARMOR_POINTS || !canAfford(ARMOR_PRICE)) return false;
+      state.money -= ARMOR_PRICE;
+      player.state.armor = ARMOR_POINTS;
+      return true;
+    }
     if (itemId === 'grenade') {
       if (weapon.state.grenades >= GRENADE.max || !canAfford(GRENADE.price)) return false;
       state.money -= GRENADE.price;
@@ -64,6 +75,7 @@ export function createEconomy(state, weapon) {
         rajawali: WEAPONS.rajawali.price,
         grenade: GRENADE.price,
         refill: REFILL_PRICE,
+        armor: ARMOR_PRICE,
       };
     },
   };

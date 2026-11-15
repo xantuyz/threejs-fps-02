@@ -10,16 +10,19 @@ import * as THREE from 'three';
 import { PALETTE } from './palette.js';
 import { createMover } from './player.js';
 import { WEAPONS } from './weapons.js';
-import { NODES, nearestNode, findPath, ATTACK_ROUTES, DEFENCE_POSTS, SITE_CENTERS } from './nav.js';
+import { NODES, nearestNode, findPath, ATTACK_ROUTES, DEFENCE_POSTS, SITE_CENTERS, SITE_NODES } from './nav.js';
+import { SITES } from './world.js';
 import { emitSound } from './state.js';
 import { clamp } from './utils.js';
 
 const BOT_TUNING = {
-  reactionMin: 0.35, reactionMax: 0.7, // seconds before the first shot
-  spreadMin: 0.01, spreadMax: 0.022, // radians, worse than a still player
-  burstMin: 3, burstMax: 5, burstPauseMin: 0.3, burstPauseMax: 0.6,
+  reactionMin: 0.25, reactionMax: 0.5, // seconds before the first shot (v2: sharper still — sim K/D was 2.0)
+  spreadMin: 0.008, spreadMax: 0.018, // radians, worse than a still player
+  burstMin: 4, burstMax: 6, burstPauseMin: 0.3, burstPauseMax: 0.6,
   sightRange: 45, sightHalfAngle: 70, sightEvery: 0.15,
   moveSpeed: 4.8, memorySeconds: 2, hearShotRadius: 25,
+  grenadeRangeMin: 8, grenadeRangeMax: 20, // lob a grenade at a hidden enemy inside this band
+  hearInvestigateSeconds: 1, // how fresh a heard noise must be to investigate
 };
 
 const ALLY_NAMES = ['Bara', 'Cakra', 'Dara', 'Eka'];
@@ -33,6 +36,7 @@ export function createBots(scene, world, state, combat, player, random, hooks) {
   const dir = new THREE.Vector3();
   const toEnemy = new THREE.Vector3();
   const chest = new THREE.Vector3();
+  const throwFrom = new THREE.Vector3();
 
   const allyMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(PALETTE.accent), roughness: 0.6, metalness: 0.1 });
   const enemyMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(PALETTE.teal), roughness: 0.6, metalness: 0.1 });
@@ -87,7 +91,8 @@ export function createBots(scene, world, state, combat, player, random, hooks) {
       group, torsoMesh: torso, headMesh: head,
       eye: new THREE.Vector3(), muzzle: new THREE.Vector3(),
       weaponId: isAllySlot ? ALLY_WEAPONS[i] : ENEMY_WEAPONS[i - 4],
-      spread: 0.016, health: 100, alive: true, fall: 0,
+      spread: 0.016, health: 100, armor: 0, alive: true, fall: 0,
+      grenades: 1, grenadeAt: -99, stepAt: -99, investigate: false, seenAt: -99, retreatAt: -99,
       botState: 'plan', waypoints: [], waypointIndex: 0, holdNode: -1,
       visibleEnemy: null, lastSeen: new THREE.Vector3(), lastSeenAt: -99,
       reactAt: 0, burstLeft: 0, burstPause: 0, cooldown: 0, sightTimer: i * 0.05,
@@ -159,6 +164,12 @@ export function createBots(scene, world, state, combat, player, random, hooks) {
       bot.torsoMesh.material = bot.side === 'arunika' ? allyMat : enemyMat;
       bot.alive = true;
       bot.health = 100;
+      bot.armor = 0;
+      bot.grenades = 1;
+      bot.grenadeAt = -99;
+      bot.investigate = false;
+      bot.seenAt = -99;
+      bot.retreatAt = -99;
       bot.fall = 0;
       bot.group.rotation.set(0, 0, 0);
       bot.visibleEnemy = null;
@@ -211,6 +222,9 @@ export function createBots(scene, world, state, combat, player, random, hooks) {
       chest.copy(other.body.position);
       if (canSee(bot, chest, other.body.crouching)) {
         bot.visibleEnemy = { kind: 'bot', bot: other, x: other.body.position.x, y: other.body.position.y, z: other.body.position.z };
+        // Teammate spotting (v2): an ally who sees an enemy marks them on the
+        // player's minimap for 1.5 s. Enemy sight never reaches the player.
+        if (bot.side === state.playerSide) other.seenAt = state.elapsed;
         break;
       }
     }
@@ -230,23 +244,98 @@ export function createBots(scene, world, state, combat, player, random, hooks) {
     return bot.side;
   }
 
+  // Hearing (v2): every bot listens for enemy noise. A fresh enemy sound turns
+  // the bot's head; gunfire, blasts and objective beeps also pull a free bot
+  // (hold/move) to investigate the spot, defenders rotate to a plant while
+  // attackers rotate back to a defuse. Own-team noise is ignored, and a bot
+  // already walking to a noise does not chase a second one mid-route. Footsteps
+  // only turn the head — they never pull a bot away from its post.
+  const HEAR_PRIORITY = { defuse: 4, plant: 3, blast: 2, shot: 1, step: 0 };
+
   function hear(bot) {
+    let best = null;
+    let bestPriority = -1;
     for (let i = state.events.length - 1; i >= 0; i -= 1) {
       const event = state.events[i];
-      if (state.elapsed - event.at > 0.6) continue;
+      if (state.elapsed - event.at > BOT_TUNING.hearInvestigateSeconds) continue;
+      if (event.side && event.side === bot.side) continue;
       const dx = event.x - bot.body.position.x;
       const dz = event.z - bot.body.position.z;
       if (dx * dx + dz * dz > event.radius * event.radius) continue;
-      if (event.kind === 'shot' || event.kind === 'plant') {
-        faceToward(bot, event.x, event.z);
-        if (bot.botState === 'hold' && event.kind === 'plant' && bot.side !== currentAttacker) {
-          bot.hearNode = nearestNode(event.x, event.z);
-          bot.botState = 'rotate';
-          pathTo(bot, bot.hearNode);
-        }
-      }
-      return;
+      const priority = HEAR_PRIORITY[event.kind] ?? -1;
+      if (priority > bestPriority) { best = event; bestPriority = priority; }
     }
+    if (!best) return;
+    faceToward(bot, best.x, best.z);
+    const fresh = state.elapsed - best.at < 0.5;
+    if (!fresh || bot.investigate) return;
+    if (bot.botState !== 'hold' && bot.botState !== 'move') return;
+    if (best.kind === 'plant' && bot.side !== currentAttacker) {
+      bot.hearNode = nearestNode(best.x, best.z);
+      bot.botState = 'rotate';
+      pathTo(bot, bot.hearNode);
+    } else if (best.kind === 'defuse' && bot.side === currentAttacker) {
+      // Attackers run back to stop the defuse.
+      bot.hearNode = nearestNode(best.x, best.z);
+      bot.botState = 'rotate';
+      pathTo(bot, bot.hearNode);
+    } else if (best.kind === 'shot' || best.kind === 'blast') {
+      bot.investigate = true;
+      bot.hearNode = nearestNode(best.x, best.z);
+      bot.botState = 'rotate';
+      pathTo(bot, bot.hearNode);
+    }
+  }
+
+  // Lob a grenade at the enemy's last seen spot (v2). Only when the enemy is
+  // hidden (no line of sight right now) and inside throwing range, one per bot
+  // per round, so grenades break holds instead of spamming the round.
+  function maybeThrowGrenade(bot) {
+    if (bot.grenades <= 0 || !hooks || !hooks.throwGrenade) return;
+    if (bot.visibleEnemy) return;
+    if (state.elapsed - bot.grenadeAt < 20) return;
+    if (state.elapsed - bot.lastSeenAt > 3) return;
+    const dx = bot.lastSeen.x - bot.body.position.x;
+    const dz = bot.lastSeen.z - bot.body.position.z;
+    const distance = Math.hypot(dx, dz);
+    if (distance < BOT_TUNING.grenadeRangeMin || distance > BOT_TUNING.grenadeRangeMax) return;
+    dir.set(dx, 0, dz).normalize();
+    dir.y = 0.45;
+    dir.normalize();
+    throwFrom.copy(bot.eye);
+    if (hooks.throwGrenade(throwFrom, dir, { side: bot.side, name: bot.name, isPlayer: false, weaponId: 'guntur', bot })) {
+      bot.grenades -= 1;
+      bot.grenadeAt = state.elapsed;
+    }
+  }
+
+  // The nearest free attacker to a dropped Pulsar, or null. Only bots that are
+  // not fighting, planting, defusing or retreating count, so the retriever is
+  // one who can actually walk over.
+  function nearestAttackerToPulsar() {
+    let best = null;
+    let bestDist = Infinity;
+    for (const other of bots) {
+      if (!other.alive || other.side !== currentAttacker) continue;
+      if (other.botState !== 'hold' && other.botState !== 'move' && other.botState !== 'retrieve') continue;
+      const dx = state.pulsar.x - other.body.position.x;
+      const dz = state.pulsar.z - other.body.position.z;
+      const d = dx * dx + dz * dz;
+      if (d < bestDist) { bestDist = d; best = other; }
+    }
+    return best;
+  }
+
+  // True when the bot stands inside a site (1 m margin). Planting is only
+  // allowed from inside — a carrier that retreated to its spawn must walk to
+  // a site first instead of planting from the spawn (v2 fix).
+  function botInSite(bot) {
+    const { x, z } = bot.body.position;
+    for (const key of ['A', 'B']) {
+      const site = SITES[key];
+      if (x >= site.minX - 1 && x <= site.maxX + 1 && z >= site.minZ - 1 && z <= site.maxZ + 1) return true;
+    }
+    return false;
   }
 
   function moveAlongWaypoints(bot, dt, speedScale) {
@@ -311,10 +400,32 @@ export function createBots(scene, world, state, combat, player, random, hooks) {
     const outnumbered = bots.filter((b) => b.alive && b.side === bot.side).length
       < bots.filter((b) => b.alive && b.side !== bot.side).length + (player.state.health > 0 && state.playerSide !== bot.side ? 1 : 0);
 
-    if (bot.health < 25 && outnumbered && bot.botState !== 'retreat' && bot.botState !== 'defuse') {
+    // Retreat (v2 fix): low HP and outnumbered — but NEVER the carrier (a
+    // carrier that retreats stalls the round with the Pulsar), and never more
+    // than once per 20 s. The old trigger fired every tick, so a bot that had
+    // just reached its spawn flipped retreat->hold->retreat forever and its
+    // 'hold' body — the carrier's plant check — never ran at all.
+    if (bot.health < 25 && outnumbered && !bot.isCarrier && state.elapsed - bot.retreatAt > 20
+      && bot.botState !== 'retreat' && bot.botState !== 'defuse') {
       bot.botState = 'retreat';
+      bot.retreatAt = state.elapsed;
       const spawnNode = bot.side === 'arunika' ? 0 : 23;
       pathTo(bot, spawnNode);
+    }
+
+    // A dropped Pulsar (v2): the nearest free attacker walks over and picks it
+    // up, so a round cannot stall after the carrier dies.
+    if (state.pulsar.state === 'dropped' && bot.side === currentAttacker
+      && (bot.botState === 'hold' || bot.botState === 'move') && nearestAttackerToPulsar() === bot) {
+      bot.botState = 'retrieve';
+      pathTo(bot, nearestNode(state.pulsar.x, state.pulsar.z));
+    }
+
+    // Running bots are heard, like the player (v2): a step sound every 0.4 s.
+    const speed = Math.hypot(bot.body.velocity.x, bot.body.velocity.z);
+    if (speed > 4 && bot.body.onGround && state.elapsed - bot.stepAt > 0.4) {
+      bot.stepAt = state.elapsed;
+      emitSound(state, bot.body.position.x, bot.body.position.z, 10, 'step', bot.side);
     }
 
     switch (bot.botState) {
@@ -354,9 +465,12 @@ export function createBots(scene, world, state, combat, player, random, hooks) {
       case 'hold': {
         bot.spread = bot.baseSpread * 0.7;
         if (bot.visibleEnemy) { bot.botState = 'engage'; break; }
-        // The carrier plants when the site has been quiet for 3 seconds.
+        // Lob a grenade at a hidden enemy's last seen spot (v2).
+        maybeThrowGrenade(bot);
+        // The carrier plants when the site has been quiet for 2 seconds — and
+        // only from inside the site (v2: a carrier at its spawn walks here first).
         if (bot.isCarrier && state.pulsar.carrier === bot.id && state.pulsar.state === 'carried'
-          && state.elapsed - bot.lastSeenAt > 3 && (bot.holdNode === 7 || bot.holdNode === 20)) {
+          && state.elapsed - bot.lastSeenAt > 2 && botInSite(bot)) {
           bot.botState = 'plant';
           bot.actionProgress = 0;
           break;
@@ -387,17 +501,45 @@ export function createBots(scene, world, state, combat, player, random, hooks) {
         const arrived = moveAlongWaypoints(bot, dt, 1);
         if (bot.visibleEnemy) { bot.botState = 'engage'; break; }
         if (arrived) {
+          bot.investigate = false;
           if (state.pulsar.state === 'planted') { bot.botState = 'defuse'; bot.actionProgress = 0; }
           else { bot.botState = 'hold'; }
         }
         break;
       }
+      case 'retrieve': {
+        // Walk to the dropped Pulsar and pick it up, then push on to a site.
+        if (state.pulsar.state !== 'dropped') { bot.botState = 'hold'; break; }
+        if (bot.visibleEnemy) { bot.botState = 'engage'; break; }
+        const dx = state.pulsar.x - bot.body.position.x;
+        const dz = state.pulsar.z - bot.body.position.z;
+        const dist = Math.hypot(dx, dz);
+        if (dist < 1.6) {
+          state.pulsar.state = 'carried';
+          state.pulsar.carrier = bot.id;
+          bot.isCarrier = true;
+          bot.botState = 'move';
+          pathTo(bot, SITE_NODES[bot.body.position.x < 0 ? 'A' : 'B']);
+          break;
+        }
+        // Close in: steer straight at the Pulsar. The nearest waypoint node
+        // can sit several metres from the drop spot, and waypoints alone never
+        // close that gap — the old code stood at the node forever (v2 fix).
+        // Same when the waypoint list is exhausted at longer range.
+        if (dist < 6 || bot.waypointIndex >= bot.waypoints.length) {
+          bot.mover.step(dt, dx / dist, dz / dist, false, false);
+          faceToward(bot, state.pulsar.x, state.pulsar.z);
+          break;
+        }
+        moveAlongWaypoints(bot, dt, 1);
+        break;
+      }
       case 'plant': {
-        if (bot.visibleEnemy || state.pulsar.carrier !== bot.id) { bot.botState = 'hold'; break; }
+        if (bot.visibleEnemy || state.pulsar.carrier !== bot.id || !botInSite(bot)) { bot.botState = 'hold'; break; }
         bot.actionProgress += dt;
         if (state.elapsed - bot.beepAt > 0.5) {
           bot.beepAt = state.elapsed;
-          emitSound(state, bot.body.position.x, bot.body.position.z, 20, 'plant');
+          emitSound(state, bot.body.position.x, bot.body.position.z, 20, 'plant', bot.side);
         }
         if (bot.actionProgress >= 4) {
           const site = bot.body.position.x < 0 ? 'A' : 'B';
@@ -418,7 +560,7 @@ export function createBots(scene, world, state, combat, player, random, hooks) {
         bot.actionProgress += dt;
         if (state.elapsed - bot.beepAt > 0.4) {
           bot.beepAt = state.elapsed;
-          emitSound(state, bot.body.position.x, bot.body.position.z, 20, 'defuse');
+          emitSound(state, bot.body.position.x, bot.body.position.z, 20, 'defuse', bot.side);
         }
         if (bot.actionProgress >= 5) {
           state.pulsar.state = 'defused';
@@ -472,6 +614,10 @@ export function createBots(scene, world, state, combat, player, random, hooks) {
     spawnRound,
     aliveCount(side) {
       return bots.filter((b) => b.alive && b.side === side).length;
+    },
+    // Enemy bots a teammate has spotted recently — the minimap's red dots (v2).
+    seenEnemies() {
+      return bots.filter((b) => b.alive && b.side !== state.playerSide && state.elapsed - b.seenAt < 1.5);
     },
   };
 }

@@ -39,7 +39,7 @@ export function createObjective(state, player, economy, hooks) {
         pulsar.site = site;
         if (state.elapsed - (pulsar.beepAt || 0) > 0.5) {
           pulsar.beepAt = state.elapsed;
-          emitSound(state, player.state.position.x, player.state.position.z, 20, 'plant');
+          emitSound(state, player.state.position.x, player.state.position.z, 20, 'plant', state.playerSide);
           if (hooks && hooks.onPlantBeep) hooks.onPlantBeep();
         }
         if (pulsar.progress >= PLANT_SECONDS) {
@@ -59,7 +59,7 @@ export function createObjective(state, player, economy, hooks) {
       pulsar.progress += dt;
       if (state.elapsed - (pulsar.beepAt || 0) > 0.4) {
         pulsar.beepAt = state.elapsed;
-        emitSound(state, player.state.position.x, player.state.position.z, 20, 'defuse');
+        emitSound(state, player.state.position.x, player.state.position.z, 20, 'defuse', state.playerSide);
         if (hooks && hooks.onDefuseBeep) hooks.onDefuseBeep();
       }
       if (pulsar.progress >= DEFUSE_SECONDS) {

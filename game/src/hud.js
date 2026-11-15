@@ -32,6 +32,8 @@ export function createHud() {
   const healthValue = document.getElementById('health-value');
   const healthFill = document.getElementById('health-fill');
   const healthBox = document.getElementById('health');
+  const armorLine = document.getElementById('armor-line');
+  const armorValue = document.getElementById('armor-value');
   const timerValue = document.getElementById('timer-value');
   const scoreValue = document.getElementById('score-value');
   const roundValue = document.getElementById('round-value');
@@ -53,6 +55,7 @@ export function createHud() {
   let lastReserve = -1;
   let lastWeapon = '';
   let lastHealth = -1;
+  let lastArmor = -1;
   let lastTimer = '';
   let lastScore = '';
   let lastMoney = '';
@@ -84,6 +87,13 @@ export function createHud() {
       healthValue.textContent = String(value);
       healthFill.style.width = `${value}%`;
       healthBox.classList.toggle('low', value <= 30);
+    },
+    setArmor(points) {
+      const value = Math.max(0, Math.round(points));
+      if (value === lastArmor) return;
+      lastArmor = value;
+      armorValue.textContent = String(value);
+      armorLine.hidden = value <= 0;
     },
     setTimer(text, danger) {
       if (text === lastTimer) return;

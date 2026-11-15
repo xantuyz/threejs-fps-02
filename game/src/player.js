@@ -101,6 +101,7 @@ export function createPlayer(colliders) {
     crouching: false,
     height: STAND_HEIGHT,
     health: 100,
+    armor: 0, // Rompi Arunika points (v2): absorb half of every hit until gone.
   };
   const mover = createMover(colliders, player, WALK_SPEED);
 

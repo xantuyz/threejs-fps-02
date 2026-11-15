@@ -31,11 +31,15 @@ const BOXES = [
   [0.5, 3.4, 12, -12, 1.7, 16, 'hairline'],
   [0.5, 3.4, 14, 12, 1.7, -1, 'hairline'],
   [0.5, 3.4, 12, 12, 1.7, 16, 'hairline'],
-  // Site wall z = -8 with lane gaps (A gap x -20..-16, B gap x 16..20).
-  [20, 3.4, 0.5, -22, 1.7, -8, 'hairline'],
+  // Site wall z = -8 with lane gaps (A gap x -20..-16, B gap x 16..20). The
+  // gaps are the rush lanes' doors — without them no attacker walking lane A
+  // or B can ever reach a site, and rounds stall on the clock (v2 fix).
+  [12, 3.4, 0.5, -26, 1.7, -8, 'hairline'],
+  [4, 3.4, 0.5, -14, 1.7, -8, 'hairline'],
   [8, 3.4, 0.5, -8, 1.7, -8, 'hairline'],
   [8, 3.4, 0.5, 8, 1.7, -8, 'hairline'],
-  [20, 3.4, 0.5, 22, 1.7, -8, 'hairline'],
+  [4, 3.4, 0.5, 14, 1.7, -8, 'hairline'],
+  [12, 3.4, 0.5, 26, 1.7, -8, 'hairline'],
   // Tall containers (2.6 m — block sight fully) on the sites and in Mid.
   [6, 2.6, 2.4, -26, 1.3, -19, 'rust'],
   [6, 2.6, 2.4, -15, 1.3, -11, 'hairline'],
@@ -48,10 +52,13 @@ const BOXES = [
   [4, 2.6, 2.4, -20, 1.3, 12, 'ink'],
   [4, 2.6, 2.4, 20, 1.3, 12, 'ink'],
   // Low crates (0.9-1.1 m — crouch cover, head visible when standing).
-  [2.4, 0.9, 1.2, -20, 0.45, -15, 'rust'],
-  [2.4, 0.9, 1.2, 20, 0.45, -15, 'rust'],
-  [1.6, 1.1, 1.6, -23, 0.55, 0, 'hairline'],
-  [1.6, 1.1, 1.6, 23, 0.55, 0, 'hairline'],
+  // Low crates marking the sites. They sit in the site corners, OFF the site
+  // centre nodes (7/20) — a crate on the node itself wedges every bot walking
+  // to it, because the 0.9 m arrival radius can never be reached (v2 fix).
+  [2.4, 0.9, 1.2, -26, 0.45, -11, 'rust'],
+  [2.4, 0.9, 1.2, 26, 0.45, -11, 'rust'],
+  [1.6, 1.1, 1.6, -20, 0.55, 0, 'hairline'],
+  [1.6, 1.1, 1.6, 20, 0.55, 0, 'hairline'],
   [2.4, 0.9, 1.2, -6, 0.45, 18, 'hairline'],
   [2.4, 0.9, 1.2, 6, 0.45, 18, 'hairline'],
   [1.6, 1.1, 1.6, -4, 0.55, -14, 'hairline'],
@@ -64,6 +71,11 @@ const BOXES = [
   [1.2, 0.6, 1.2, -28, 0.3, -17.5, 'hairline'],
   [1.2, 0.6, 1.2, 28, 0.3, -17.5, 'hairline'],
 ];
+
+// The minimap (v2) draws the same box table as flat rectangles, so the map
+// always matches the real walls. Floors (height 0.4) are skipped.
+export const MINIMAP_WALLS = BOXES.filter((b) => b[1] > 0.4)
+  .map((b) => ({ x: b[3] - b[0] / 2, z: b[5] - b[2] / 2, w: b[0], d: b[2] }));
 
 // Floor tints: thin coloured planes that mark the zones. They are MESHES ONLY —
 // never colliders or shootables, or they would block every step on the map

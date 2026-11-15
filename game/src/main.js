@@ -3,12 +3,15 @@
 //   rounds:    BUY 15s -> LIVE 100s -> ROUND_END 5s, first-to-8, max 15 rounds,
 //              halftime side swap after round 7. See rounds.js.
 //   bots:      9 bots with waypoint routes, hold posts, sight raycasts, hearing,
-//              burst fire, plant/defuse, rotation and retreat. See bots.js.
+//              burst fire, plant/defuse, rotation and retreat, grenade throws,
+//              Pulsar retrieval and teammate spotting. See bots.js.
 //   combat:    one hitscan path for player and bots: headshot x4, damage falloff,
-//              spread (move punished, crouch/ADS rewarded), tracers. See combat.js.
-//   tactics:   economy + buy menu (3 rifles/SMG/shotgun + pistol + grenade),
-//              Pulsar plant/defuse objective, grenade arcs. See economy.js,
-//              objective.js, projectiles.js, weapons.js.
+//              spread (move punished, crouch/ADS rewarded), tracers, armor
+//              absorbs half of every hit. See combat.js.
+//   tactics:   economy + buy menu (3 rifles/SMG/shotgun + pistol + grenade +
+//              armor), Pulsar plant/defuse objective, grenade arcs, minimap +
+//              compass. See economy.js, objective.js, projectiles.js, weapons.js,
+//              minimap.js.
 //   map:       Dermaga Meridian — 2 sites, 3 lanes, 64x48 m, built from data.
 //              See world.js + nav.js. Single state store: state.js.
 //   loop:      fixed-step 60 Hz simulation, render only reads state; no
@@ -27,9 +30,10 @@ import { createWeapon, WEAPONS, GRENADE, WEAPON_ORDER } from './weapons.js';
 import { createHud } from './hud.js';
 import { createEffects } from './effects.js';
 import { createAudio } from './audio.js';
-import { createEconomy } from './economy.js';
+import { createEconomy, ARMOR_PRICE, ARMOR_POINTS } from './economy.js';
 import { createObjective } from './objective.js';
 import { createProjectiles } from './projectiles.js';
+import { createMinimap } from './minimap.js';
 import { applyShot } from './shots.js';
 import { PALETTE } from './palette.js';
 import { mulberry32, formatTimer, formatMoney } from './utils.js';
@@ -44,7 +48,7 @@ const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'hi
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.type = THREE.PCFShadowMap;
 document.getElementById('game').appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
@@ -58,9 +62,10 @@ const world = createWorld(scene);
 const effects = createEffects(scene);
 const audio = createAudio();
 const hud = createHud();
+const minimap = createMinimap();
 const player = createPlayer(world.colliders);
 const weapon = createWeapon(camera);
-const economy = createEconomy(state, weapon);
+const economy = createEconomy(state, weapon, player);
 const combat = createCombat(scene, world, effects, state, () => bots.list, player);
 let bots;
 bots = createBots(scene, world, state, combat, player, random, {
@@ -68,6 +73,10 @@ bots = createBots(scene, world, state, combat, player, random, {
     const distance = Math.hypot(bot.eye.x - player.state.position.x, bot.eye.z - player.state.position.z);
     audio.shot(bot.weaponId, distance);
     if (result.hit && player.state.health <= 0) audio.play('hurt');
+  },
+  // Bots throw grenades through the same projectile system as the player (v2).
+  throwGrenade(from, dir, shooter) {
+    return projectiles.throwGrenade(from, dir, shooter);
   },
 });
 const rounds = createRounds(state, bots, player, economy, {
@@ -109,6 +118,7 @@ let accumulator = 0;
 let lastTime = performance.now();
 let lastHealth = 100;
 let stepTimer = 0;
+let minimapTimer = 0;
 let wasFiring = false;
 
 hud.setAmmo(weapon.ammo.rajawali.mag, weapon.ammo.rajawali.reserve, WEAPONS.rajawali.name);
@@ -187,7 +197,7 @@ function playerShoot() {
 
 let lastBuyKey = '';
 function buyMenuKey() {
-  return `${state.money}|${WEAPON_ORDER.map((id) => (weapon.state.owned[id] ? '1' : '0')).join('')}|${weapon.state.grenades}`;
+  return `${state.money}|${WEAPON_ORDER.map((id) => (weapon.state.owned[id] ? '1' : '0')).join('')}|${weapon.state.grenades}|${body.armor}`;
 }
 
 function syncBuyMenu() {
@@ -206,11 +216,29 @@ function syncBuyMenu() {
     id: 'refill', key: '5', name: 'Isi ulang peluru cadangan',
     price: formatMoney(200), disabled: state.money < 200,
   });
+  items.push({
+    id: 'armor', key: '6', name: `Rompi Arunika (${body.armor}/${ARMOR_POINTS})`,
+    price: formatMoney(ARMOR_PRICE),
+    disabled: body.armor >= ARMOR_POINTS || state.money < ARMOR_PRICE,
+  });
   hud.showBuyMenu(items, formatMoney(state.money));
 }
 
-function pulsarStatusText() {
-  const pulsar = state.pulsar;
+// Snapshot for the minimap + compass (v2): the player, living allies, enemies
+// a teammate has spotted recently, and the Pulsar when it is on the ground.
+// Built ~4 times a second — the small allocations here never touch the 60 Hz loop.
+function minimapSnapshot() {
+  return {
+    player: { x: body.position.x, z: body.position.z, yaw: body.yaw },
+    allies: bots.list.filter((b) => b.alive && b.side === state.playerSide)
+      .map((b) => ({ x: b.body.position.x, z: b.body.position.z })),
+    enemies: bots.seenEnemies()
+      .map((b) => ({ x: b.body.position.x, z: b.body.position.z })),
+    pulsar: { state: state.pulsar.state, x: state.pulsar.x, z: state.pulsar.z },
+  };
+}
+
+function pulsarStatusText() {  const pulsar = state.pulsar;
   if (pulsar.state === 'carried' && pulsar.carrier === 'player') return 'PULSAR DIBAWA — tahan E di Site A / B untuk menanam';
   if (pulsar.state === 'dropped') return 'PULSAR JATUH — tekan G untuk mengambil';
   if (pulsar.state === 'planted') return `PULSAR DITANAM — SITE ${pulsar.site} — ${formatTimer(pulsar.explodeIn)}`;
@@ -239,7 +267,7 @@ function step(dt) {
       if (stepTimer <= 0) {
         stepTimer = player.groundSpeed() > 4 ? 0.32 : 0.5;
         audio.play('step');
-        if (player.groundSpeed() > 4) emitSound(state, body.position.x, body.position.z, 10, 'step');
+        if (player.groundSpeed() > 4) emitSound(state, body.position.x, body.position.z, 10, 'step', state.playerSide);
       }
     }
     return;
@@ -256,6 +284,7 @@ function syncHud() {
   const slot = weapon.ammo[weapon.state.current];
   hud.setAmmo(slot.mag, slot.reserve, def.name);
   hud.setHealth(body.health);
+  hud.setArmor(body.armor);
   if (body.health < lastHealth) hud.damageFlash();
   lastHealth = body.health;
   if (state.phase === PHASES.BUY) hud.setTimer(`BUY ${formatTimer(state.buyTimeLeft)}`, state.buyTimeLeft < 5);
@@ -287,13 +316,14 @@ function handlePressed() {
       camera.getWorldDirection(direction);
       if (projectiles.throwGrenade(camera.position, direction)) weapon.state.grenades -= 1;
     }
-    // Buy hotkeys only during BUY: 1 Kancil, 2 Badak, 3 Rajawali, 4 granat, 5 refill.
+    // Buy hotkeys only during BUY: 1 Kancil, 2 Badak, 3 Rajawali, 4 granat, 5 refill, 6 armor.
     if (state.phase === PHASES.BUY) {
       if (code === 'Digit1' && economy.buy('kancil')) audio.play('buy');
       if (code === 'Digit2' && economy.buy('badak')) audio.play('buy');
       if (code === 'Digit3' && economy.buy('rajawali')) audio.play('buy');
       if (code === 'Digit4' && economy.buy('grenade')) audio.play('buy');
       if (code === 'Digit5' && economy.buy('refill')) audio.play('buy');
+      if (code === 'Digit6' && economy.buy('armor')) audio.play('buy');
       if (code.startsWith('Digit')) syncBuyMenu();
     }
     // Q cycles owned weapons during LIVE.
@@ -328,6 +358,12 @@ function frame(now) {
     if (accumulator > FIXED_STEP * 5) accumulator = 0;
     syncCamera();
     syncHud();
+    // The minimap and compass redraw ~4 times a second — plenty for a map.
+    minimapTimer += dt;
+    if (minimapTimer > 0.25) {
+      minimapTimer = 0;
+      minimap.draw(minimapSnapshot());
+    }
     // The buy menu is DOM-expensive to rebuild: refresh it only when the
     // money, ownership or grenade count actually changed.
     if (state.phase === PHASES.BUY) {
@@ -382,12 +418,13 @@ function runShot(name) {
     },
     buyItems() {
       return WEAPON_ORDER.filter((id) => id !== 'p9').map((id, index) => ({
-        id, key: String(index + 2), name: WEAPONS[id].name,
+        id, key: String(index + 1), name: WEAPONS[id].name,
         price: formatMoney(WEAPONS[id].price),
         disabled: weapon.state.owned[id] || state.money < WEAPONS[id].price,
       })).concat([
         { id: 'grenade', key: '4', name: `${GRENADE.name} ×0/${GRENADE.max}`, price: formatMoney(GRENADE.price), disabled: state.money < GRENADE.price },
         { id: 'refill', key: '5', name: 'Isi ulang peluru cadangan', price: formatMoney(200), disabled: state.money < 200 },
+        { id: 'armor', key: '6', name: `Rompi Arunika (0/${ARMOR_POINTS})`, price: formatMoney(ARMOR_PRICE), disabled: state.money < ARMOR_PRICE },
       ]);
     },
     settle,
@@ -395,6 +432,7 @@ function runShot(name) {
   applyShot(name, api);
   syncCamera();
   syncHud();
+  minimap.draw(minimapSnapshot());
   paintTwiceThenReady();
 }
 
